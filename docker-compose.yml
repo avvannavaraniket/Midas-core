@@ -1,0 +1,113 @@
+# Full Midas Core stack: Zookeeper + Kafka + PostgreSQL + Spring Boot app.
+# Start everything:  docker compose up --build
+# Detached:         docker compose up -d --build
+# Stop:             docker compose down
+#
+# Ports on your machine (host):
+#   33400 — Midas Core HTTP API
+#   5432  — PostgreSQL (optional host access)
+#   9092  — Kafka (host clients; containers use kafka:29092)
+
+name: midascore
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: midascore-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+    ports:
+      - "2181:2181"
+    networks:
+      - midas
+    healthcheck:
+      test: ["CMD", "cub", "zk-ready", "localhost", "2181", "40"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: midascore-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: "1"
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      # Two listeners: internal Docker DNS name + host localhost (see teaching notes in chat).
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - midas
+    healthcheck:
+      test: ["CMD", "cub", "kafka-ready", "-b", "localhost:9092", "1", "60"]
+      interval: 10s
+      timeout: 15s
+      retries: 10
+      start_period: 45s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: midascore-postgres
+    environment:
+      POSTGRES_DB: midasdb
+      POSTGRES_USER: midas
+      POSTGRES_PASSWORD: midas
+    ports:
+      - "5432:5432"
+    volumes:
+      - midas_pg_data:/var/lib/postgresql/data
+    networks:
+      - midas
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U midas -d midasdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  midas-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: midascore:local
+    container_name: midascore-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "33400:33400"
+    environment:
+      MIDAS_DB_URL: jdbc:postgresql://postgres:5432/midasdb
+      MIDAS_DB_USER: midas
+      MIDAS_DB_PASSWORD: midas
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # Same container calls its own REST incentive endpoint (loopback).
+      MIDAS_INCENTIVE_API_URL: http://127.0.0.1:33400/api/v1/incentive
+      SPRING_JPA_SHOW_SQL: "false"
+      JWT_SECRET: "docker-dev-jwt-secret-change-in-real-env-32chars!!"
+      ADMIN_BOOTSTRAP_USERNAME: admin
+      ADMIN_BOOTSTRAP_PASSWORD: changeme
+    networks:
+      - midas
+
+networks:
+  midas:
+    driver: bridge
+
+volumes:
+  midas_pg_data:
